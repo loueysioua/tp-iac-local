@@ -90,13 +90,10 @@ jobs:
 
       # Installation de Docker (nécessaire pour le provider Docker)
       - name: "🐳 Setup — Installation et démarrage de Docker"
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q docker.io
-          sudo systemctl start docker
-          sudo systemctl enable docker
-          sudo usermod -aG docker $USER
-          docker --version
+        uses: docker/setup-buildx-action@v3
+
+      - name: Start Docker daemon
+        run: sudo systemctl start docker || sudo service docker start
 
       - name: "⚙️ Setup — Installation de Terraform"
         uses: hashicorp/setup-terraform@v3
