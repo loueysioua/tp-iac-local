@@ -1,0 +1,21 @@
+# 1. Image de base ultra-légère
+FROM alpine:latest
+
+# 2. Mise à jour des paquets et installation de Nginx
+RUN apk update && \
+    apk add --no-cache nginx && \
+    rm -rf /var/cache/apk/*
+
+# 3. Copie de la page de preuve de déploiement
+RUN mkdir -p /var/www/localhost/htdocs
+COPY index.html /var/www/localhost/htdocs/index.html
+
+# Configuration minimale de Nginx pour pointer vers le bon répertoire
+RUN printf 'server {\n  listen 80;\n  root /var/www/localhost/htdocs;\n  index index.html;\n}\n' \
+    > /etc/nginx/http.d/default.conf
+
+# 4. Exposition du port 80
+EXPOSE 80
+
+# 5. Démarrage de Nginx en mode non-démonisé (foreground)
+CMD ["nginx", "-g", "daemon off;"]

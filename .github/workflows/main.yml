@@ -1,0 +1,202 @@
+# ==============================================================
+# .github/workflows/main.yml — Pipeline CI/CD GitHub Actions
+# TP IaC — Partie II : Automatisation DevOps
+# ==============================================================
+#
+# Ce pipeline s'exécute automatiquement à chaque push sur la
+# branche principale (main) et applique le cycle de vie Terraform.
+# ==============================================================
+
+name: "🚀 Terraform IaC — CI/CD Pipeline"
+
+# ---------------------------------------------------------------
+# Déclencheurs du pipeline
+# ---------------------------------------------------------------
+on:
+  push:
+    branches:
+      - main # Déploiement automatique sur push vers main
+  pull_request:
+    branches:
+      - main # Plan uniquement sur les Pull Requests (pas d'apply)
+  workflow_dispatch: # Déclenchement manuel depuis l'interface GitHub
+
+# ---------------------------------------------------------------
+# Permissions minimales requises
+# ---------------------------------------------------------------
+permissions:
+  contents: read
+  pull-requests: write # Pour poster les résultats du plan sur les PRs
+
+# ---------------------------------------------------------------
+# Variables d'environnement globales
+# ---------------------------------------------------------------
+env:
+  TF_VERSION: "1.6.0"
+  WORKING_DIR: "."
+
+# ---------------------------------------------------------------
+# Jobs du pipeline
+# ---------------------------------------------------------------
+jobs:
+  # =============================================================
+  # JOB 1 : Validation & Lint du code Terraform
+  # =============================================================
+  terraform-validate:
+    name: "🔍 Validate — Lint & Format Check"
+    runs-on: ubuntu-latest
+
+    steps:
+      # Étape 1 : Récupération du code source
+      - name: "📥 Checkout — Récupération du code"
+        uses: actions/checkout@v4
+
+      # Étape 2 : Installation de Terraform
+      - name: "⚙️ Setup — Installation de Terraform ${{ env.TF_VERSION }}"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Étape 3 : Vérification du formatage (terraform fmt)
+      - name: "🎨 Format — Vérification du style HCL"
+        id: fmt
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.WORKING_DIR }}
+        continue-on-error: true # Ne bloque pas, affiche juste un warning
+
+      # Étape 4 : Initialisation sans backend (pour validation)
+      - name: "🔧 Init — Initialisation pour validation"
+        id: init
+        run: terraform init -backend=false
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Étape 5 : Validation de la syntaxe Terraform
+      - name: "✅ Validate — Validation de la syntaxe"
+        id: validate
+        run: terraform validate
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # =============================================================
+  # JOB 2 : Plan — Simulation du déploiement
+  # =============================================================
+  terraform-plan:
+    name: "📋 Plan — Simulation du déploiement"
+    runs-on: ubuntu-latest
+    needs: terraform-validate # Dépend du job de validation
+
+    steps:
+      - name: "📥 Checkout — Récupération du code"
+        uses: actions/checkout@v4
+
+      # Installation de Docker (nécessaire pour le provider Docker)
+      - name: "🐳 Setup — Installation et démarrage de Docker"
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q docker.io
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          sudo usermod -aG docker $USER
+          docker --version
+
+      - name: "⚙️ Setup — Installation de Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Initialisation avec téléchargement des providers
+      - name: "🔧 Init — Téléchargement des providers (DLC : Initialisation)"
+        id: init
+        run: terraform init
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Plan : simulation du déploiement (injection des variables via secrets)
+      - name: "📋 Plan — Simulation & Détection des changements (DLC : Planification)"
+        id: plan
+        run: |
+          terraform plan \
+            -var="db_password=${{ secrets.DB_PASSWORD || 'strongpassword123' }}" \
+            -var="db_user=${{ secrets.DB_USER || 'devops_user' }}" \
+            -out=tfplan \
+            -no-color
+        working-directory: ${{ env.WORKING_DIR }}
+        # GATE : Si le plan échoue, l'apply NE s'exécutera PAS
+
+      # Publication du résultat du plan sur les Pull Requests
+      - name: "💬 Comment — Publication du plan sur la PR"
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### 🔧 Terraform Plan Result
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+            `;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      # Sauvegarde du plan pour l'étape Apply
+      - name: "💾 Artifact — Sauvegarde du plan Terraform"
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: tfplan
+          retention-days: 1
+
+  # =============================================================
+  # JOB 3 : Apply — Déploiement continu (PUSH vers main SEULEMENT)
+  # =============================================================
+  terraform-apply:
+    name: "🚀 Apply — Déploiement Continu (DLC : Application)"
+    runs-on: ubuntu-latest
+    needs: terraform-plan # Dépend du Plan — GATE essentiel
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # ↑ N'applique QUE sur push vers main (pas sur les PRs)
+    # Environnement protégé (approbation manuelle possible)
+    environment:
+      name: production
+      url: https://github.com/${{ github.repository }}
+
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+
+      - name: "🐳 Setup Docker"
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q docker.io
+          sudo systemctl start docker
+          sudo usermod -aG docker $USER
+
+      - name: "⚙️ Setup Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: "🔧 Init"
+        run: terraform init
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Récupération du plan sauvegardé par le job précédent
+      - name: "📦 Artifact — Récupération du plan"
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+
+      # Apply : application du plan validé (Déploiement Continu)
+      - name: "🚀 Apply — Application des changements (DLC : Déploiement)"
+        run: |
+          terraform apply \
+            -auto-approve \
+            -var="db_password=${{ secrets.DB_PASSWORD || 'strongpassword123' }}" \
+            -var="db_user=${{ secrets.DB_USER || 'devops_user' }}"
+        working-directory: ${{ env.WORKING_DIR }}
+
+      # Affichage des outputs pour confirmer le déploiement
+      - name: "📊 Outputs — Résumé du déploiement"
+        run: terraform output
+        working-directory: ${{ env.WORKING_DIR }}
